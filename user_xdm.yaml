@@ -1,0 +1,226 @@
+/* ------------ aws security hub  --------- */
+[MODEL: dataset="aws_security_hub_generic_alert_raw"]
+alter
+        outcome = json_extract_scalar(Compliance, "$.Status"),
+        severity_label = json_extract_scalar(Severity, "$.Label")
+| alter
+        xdm.alert.name = Title,
+        xdm.alert.description = Description,
+        xdm.alert.original_alert_id = Id,
+        xdm.alert.subcategory = Types,
+        xdm.source.zone = Region,
+        xdm.alert.severity = severity_label,
+        xdm.event.log_level = if(severity_label = "CRITICAL", XDM_CONST.LOG_LEVEL_CRITICAL, severity_label = "HIGH", XDM_CONST.LOG_LEVEL_ERROR, severity_label = "MEDIUM", XDM_CONST.LOG_LEVEL_WARNING, severity_label = "LOW", XDM_CONST.LOG_LEVEL_INFORMATIONAL, severity_label = "INFORMATIONAL", XDM_CONST.LOG_LEVEL_INFORMATIONAL, to_string(severity_label)),
+        xdm.target.resource.id = arraystring(arraymap(Resources -> [], json_extract_scalar("@element","$.Id")), ", "),
+        xdm.target.resource.type = arraystring(arraymap(Resources -> [], json_extract_scalar("@element","$.Type")), ", "),
+        xdm.event.outcome = if(outcome="PASSED", XDM_CONST.OUTCOME_SUCCESS, outcome="FAILED", XDM_CONST.OUTCOME_FAILED, outcome="WARNING", XDM_CONST.OUTCOME_PARTIAL , outcome="NOT_AVAILABLE", XDM_CONST.OUTCOME_UNKNOWN, to_string(outcome)),
+        xdm.observer.product = ProductName,
+        xdm.source.cloud.project = AwsAccountId,
+        xdm.source.cloud.provider = XDM_CONST.CLOUD_PROVIDER_AWS;
+/* ------------ aws security hub  --------- */
+
+/* ------------ citrix_adc_raw  --------- */
+[MODEL: dataset=citrix_accesslog_raw]
+alter
+    xdm.observer.name  = arrayindex(regextract(_raw_log, "<\d+>\s+\S+\s+\S+\s+(?<hostname>\S+)"),0),
+    xdm.source.ipv4 = arrayindex(regextract(_raw_log,"src=(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"), 0),
+    xdm.target.ipv4 = arrayindex(regextract(_raw_log,"dst=(\d{1,3}(?:\.\d{1,3}){3})"), 0),
+    xdm.source.port = to_integer(arrayindex(regextract(_raw_log,"srcPort=(\d+)"), 0)),
+    xdm.target.port = to_integer(arrayindex(regextract(_raw_log,"dstPort=(\d+)"), 0)),
+    xdm.target.application.name   = arrayindex(regextract(_raw_log,"resource=([^\s]+)"), 0),
+    xdm.network.http.url = arrayindex(regextract(_raw_log,"url=([^\s]+)"), 0),
+    xdm.network.http.method = arrayindex(regextract(_raw_log,"http_method=([A-Z]+)"), 0),
+    xdm.source.user_agent = arrayindex(regextract(_raw_log,"user_agent=(.*?)\s+client_tls_info="), 0),
+    xdm.network.tls.cipher = arrayindex(regextract(_raw_log,"client_tls_info=([^\s]+)"), 0),
+    xdm.source.user.username = arrayindex(regextract(_raw_log,"User\s+(.*?)\s+-\s+ADM_User"), 0),
+    xdm.event.operation_sub_type = arrayindex(regextract(_raw_log,"default\s+([A-Z]+)"), 0),
+    xdm.source.process.command_line = arrayindex(regextract(_raw_log, "Command\s+\"(.*?)\""),0),
+    xdm.event.outcome = arrayindex(regextract(_raw_log, "Status\s+\"(.*?)\""),0),
+    xdm.network.http.response_code = arrayindex(regextract(_raw_log,"http_status_code=(\d+)"), 0);
+/* ------------ citrix_adc_raw  --------- */
+
+/* ------------ linux bind --------- */
+[MODEL: dataset="linux_bind_raw"]
+filter _raw_log contains "named[" and _raw_log contains "query:"
+| alter
+    hostname = arrayindex(regextract(_raw_log,"\d{2}:\d{2}:\d{2}\s+(\S+)\s+named"),0),
+    process_pid = to_integer(arrayindex(regextract(_raw_log,"named\[(\d+)\]"),0)),
+    client_handle = arrayindex(regextract(_raw_log,"client\s+@(\S+?)\s"),0),
+    client_ip = arrayindex(regextract(_raw_log,"client\s+@\S+\s+(\d{1,3}(?:\.\d{1,3}){3})"),0),
+    client_port = to_integer(arrayindex(regextract(_raw_log,"#(\d+)\s+\("),0)),
+    process_name = arrayindex(regextract(_raw_log, "(named)\[[0-9]+\]"),0),
+    dns_query = arrayindex(regextract(_raw_log,"\(([^)]+)\)\:\s+query\:"),0),
+    dns_record_type = arrayindex(regextract(_raw_log,"query\:\s+\S+\s+IN\s+([A-Z0-9]+)"),0),
+    dns_server_ip = arrayindex(regextract(_raw_log,"\((\d{1,3}(?:\.\d{1,3}){3})\)\s*$"),0)
+/* XDM mapping */
+| alter
+    xdm.event.description = _raw_log,
+    xdm.event.type = dns_record_type,
+    xdm.observer.name = hostname,
+    xdm.source.process.pid  = process_pid,
+    xdm.source.process.name  = process_name,
+    xdm.source.ipv4 = client_ip,
+    xdm.source.port = client_port,
+    xdm.network.session_id = client_handle,
+    xdm.target.domain  = dns_query,
+    xdm.target.ipv4 = dns_server_ip,
+    xdm.event.outcome = XDM_CONST.OUTCOME_SUCCESS;
+/* ------------ linux bind --------- */
+
+/* ------------ f5 waf dos --------- */
+[MODEL: dataset="f5_dos_raw"]
+// raw log parsing
+ alter 
+    action = arrayindex(regextract(_raw_log, "action=.(.*).,hostname="), 0),
+	hostname = arrayindex(regextract(_raw_log, "hostname=.(.*).,bigip_mgmt_ip="), 0),
+//	bigip_mgmt_ip = arrayindex(regextract(_raw_log, "bigip_mgmt_ip=.(.*).,bigip_mgmt_ip2="), 0),
+//	bigip_mgmt_ip2 = arrayindex(regextract(_raw_log, "bigip_mgmt_ip2=.(.*).,client_ip_geo_location="), 0),
+//	client_ip_geo_location = arrayindex(regextract(_raw_log, "client_ip_geo_location=.(.*).,client_request_uri="), 0),
+//	client_request_uri = arrayindex(regextract(_raw_log, "client_request_uri=.(.*).,configuration_date_time="), 0),
+//	configuration_date_time = arrayindex(regextract(_raw_log, "configuration_date_time=.(.*).,context_name="), 0),
+//	context_name = arrayindex(regextract(_raw_log, "context_name=.(.*).,context_type="), 0),
+//	context_type = arrayindex(regextract(_raw_log, "context_type=.(.*).,date_time="), 0),
+//	date_time = arrayindex(regextract(_raw_log, "date_time=.(.*).,device_product="), 0),
+//	device_product = arrayindex(regextract(_raw_log, "device_product=.(.*).,device_vendor="), 0),
+//	device_vendor = arrayindex(regextract(_raw_log, "device_vendor=.(.*).,device_version="), 0),
+	device_version = arrayindex(regextract(_raw_log, "device_version=.(.*).,device_blade="), 0),
+	device_blade = arrayindex(regextract(_raw_log, "device_blade=.(.*).,dos_attack_detection_mode="), 0),
+//	dos_attack_detection_mode = arrayindex(regextract(_raw_log, "dos_attack_detection_mode=.(.*).,dos_attack_event="), 0),
+	dos_attack_event = arrayindex(regextract(_raw_log, "dos_attack_event=.(.*).,dos_attack_id="), 0),
+	dos_attack_id = arrayindex(regextract(_raw_log, "dos_attack_id=.(.*).,dos_attack_latency="), 0),
+//	dos_attack_latency = arrayindex(regextract(_raw_log, "dos_attack_latency=.(.*).,dos_attack_name="), 0),
+	dos_attack_name = arrayindex(regextract(_raw_log, "dos_attack_name=.(.*).,dos_attack_tps="), 0),
+//	dos_attack_tps = arrayindex(regextract(_raw_log, "dos_attack_tps=.(.*).,dos_baseline_latency="), 0),
+//	dos_baseline_latency = arrayindex(regextract(_raw_log, "dos_baseline_latency=.(.*).,dos_baseline_tps="), 0),
+//	dos_baseline_tps = arrayindex(regextract(_raw_log, "dos_baseline_tps=.(.*).,dos_baseline_traffic_percent="), 0),
+//	dos_baseline_traffic_percent = arrayindex(regextract(_raw_log, "dos_baseline_traffic_percent=.(.*).,dos_current_traffic_percent="), 0),
+//	dos_current_traffic_percent = arrayindex(regextract(_raw_log, "dos_current_traffic_percent=.(.*).,dos_dropped_requests_count="), 0),
+//	dos_dropped_requests_count = arrayindex(regextract(_raw_log, "dos_dropped_requests_count=.(.*).,dos_incoming_requests_count="), 0),
+//	dos_incoming_requests_count = arrayindex(regextract(_raw_log, "dos_incoming_requests_count=.(.*).,dos_mitigation_action="), 0),
+	dos_mitigation_action = arrayindex(regextract(_raw_log, "dos_mitigation_action=.(.*).,dos_mitigation_reason="), 0),
+	dos_mitigation_reason = arrayindex(regextract(_raw_log, "dos_mitigation_reason=.(.*).,errdefs_msgno="), 0),
+//	errdefs_msgno = arrayindex(regextract(_raw_log, "errdefs_msgno=.(.*).,errdefs_msg_name="), 0),
+	errdefs_msg_name = arrayindex(regextract(_raw_log, "errdefs_msg_name=.(.*).,severity="), 0),
+	severity = arrayindex(regextract(_raw_log, "severity=.(.*).,partition_name="), 0),
+//	partition_name = arrayindex(regextract(_raw_log, "partition_name=.(.*).,profile_name="), 0),
+	profile_name = arrayindex(regextract(_raw_log, "profile_name=.(.*).,reported_entity_type="), 0),
+	reported_entity_type = arrayindex(regextract(_raw_log, "reported_entity_type=.(.*).,source_ip="), 0),
+	source_ip = arrayindex(regextract(_raw_log, "source_ip=.(.*).,timestamp="), 0),
+//	timestamp = arrayindex(regextract(_raw_log, "timestamp=.(.*).,device_id="), 0),
+	device_id = arrayindex(regextract(_raw_log, "device_id=.(.*).,event_id="), 0),
+	event_id = arrayindex(regextract(_raw_log, "event_id=.(.*).,dos_detection_threshold="), 0)
+//	dos_detection_threshold = arrayindex(regextract(_raw_log, "dos_detection_threshold=.(.*).,dos_mitigate_to_threshold="), 0),
+//	dos_mitigate_to_threshold = arrayindex(regextract(_raw_log, "dos_mitigate_to_threshold=.(.*).,dos_detection_condition="), 0),
+//	dos_detection_condition = arrayindex(regextract(_raw_log, "dos_detection_condition=.(.*)"), 0)
+
+// xdm mapping
+| alter
+    xdm.event.id = event_id,
+	xdm.event.type = dos_attack_event, 
+	xdm.event.description = dos_attack_name,
+    xdm.event.operation = action,
+	xdm.event.operation_sub_type = dos_mitigation_action,
+	xdm.alert.name = dos_attack_name,
+	xdm.alert.original_threat_id = dos_attack_id,
+    xdm.alert.original_threat_name = errdefs_msg_name,
+    xdm.alert.severity = severity,
+	xdm.source.ipv4 = source_ip,
+//	xdm.source.location.country = client_ip_geo_location,
+	xdm.target.resource.name = profile_name,
+	xdm.target.resource.type = reported_entity_type,
+	xdm.network.http.url = client_request_uri,
+	xdm.event.outcome = dos_mitigation_action,
+	xdm.event.outcome_reason = dos_mitigation_reason,
+//	xdm.observer.product = device_product,
+//	xdm.observer.vendor = device_vendor,
+	xdm.observer.version = device_version,
+	xdm.observer.unique_identifier = device_id,
+	xdm.observer.name = hostname,
+	xdm.observer.sub_type = device_blade,
+    xdm.event.format = _raw_log;
+/* ------------ f5 waf dos --------- */
+
+/* ------------ Skyhigh Secure Web Gateway for Cloud --------- */
+[MODEL: dataset="mcafee_webgateway_cloud_raw"]
+// raw log parsing
+alter log_array = split(_raw_log , """\",\"""")
+
+| alter
+    username = arrayindex(log_array, 1),
+    client_ip = arrayindex(log_array, 2),
+    method = arrayindex(log_array, 3),
+	bytes_to_client = arrayindex(log_array, 4),
+	bytes_from_client = arrayindex(log_array, 5),
+	host = arrayindex(log_array, 6),
+    url_path = arrayindex(log_array, 7),
+    outcome = arrayindex(log_array, 8),
+    outcome_reason = arrayindex(log_array, 9),
+    request_id = arrayindex(log_array, 10), //ID
+//    request_timestamp = arrayindex(log_array, 11), //Time
+    protocol = arrayindex(log_array, 12),
+    url_category = arrayindex(log_array, 13),
+	media_type = arrayindex(log_array, 14),
+	app_name = arrayindex(log_array, 15),
+    web_reputation = arrayindex(log_array, 16),
+	policy = arrayindex(log_array, 17),
+    http_status_code = arrayindex(log_array, 18),
+	local_ip = arrayindex(log_array, 19),
+	referer = arrayindex(log_array, 20), /// empty
+    rule_name = arrayindex(log_array, 21),
+	user_agent_product = arrayindex(log_array, 22),
+//    user_agent_version = arrayindex(log_array, 23),
+    user_agent = arrayindex(log_array, 24),
+//	process = arrayindex(log_array, 25),
+//    app_instance = arrayindex(log_array, 26), //some IP
+    destination_port = arrayindex(log_array, 27),
+//    country = arrayindex(log_array, 28),
+//    request_url = arrayindex(log_array, 29),
+//    reserved  = arrayindex(log_array, 30),
+//    flag_1 = arrayindex(log_array, 31),
+//    flag_2 = arrayindex(log_array, 32),
+//    flag_3 = arrayindex(log_array, 33),
+//    flag_4 = arrayindex(log_array, 34),
+    session_id  = arrayindex(log_array, 35),
+    resource_name  = arrayindex(log_array, 36),
+//    x_forwarded_for_1 = arrayindex(log_array, 37),//IP
+//    x_forwarded_for_2  = arrayindex(log_array, 38),//IP
+    source_port  = arrayindex(log_array, 39)
+
+// Constants
+| alter //xdm.observer.vendor = "Skyhigh",
+    //xdm.observer.product = "Secure Web Gateway",
+    xdm.event.type = "WEB"
+
+| alter 
+    xdm.source.user.username = username,
+    xdm.source.ipv4 = client_ip,
+    xdm.network.http.method = method,
+    xdm.target.sent_bytes = to_integer(bytes_to_client),
+    xdm.source.sent_bytes = to_integer(bytes_from_client),
+    xdm.target.host.hostname = host, xdm.network.http.domain = host,
+    xdm.network.http.url = concat(host, url_path),
+    xdm.event.outcome = outcome,
+    xdm.event.outcome_reason = outcome_reason,
+    xdm.event.id = request_id,
+    xdm.network.application_protocol = protocol,
+    xdm.network.http.url_category = url_category,
+    xdm.network.http.content_type = media_type,
+    xdm.target.application.name = app_name,
+    xdm.alert.category  = web_reputation,
+    xdm.observer.type = policy,
+    xdm.network.http.response_code = http_status_code,
+    xdm.intermediate.ipv4 = local_ip,
+    xdm.network.http.referrer = referer,
+    xdm.network.rule = rule_name,
+    xdm.source.user_agent = user_agent_product,
+    xdm.network.http.browser = user_agent,
+//    xdm.appli = process,
+//    xdm.target.ipv4 = destination_ip,
+    xdm.target.port = to_integer(destination_port), 
+    xdm.network.session_id = session_id,
+    xdm.target.resource.name = resource_name,
+    xdm.source.port = to_integer(source_port);
+
+
+
+/* ------------ Skyhigh Secure Web Gateway for Cloud --------- */
