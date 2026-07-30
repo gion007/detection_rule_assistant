@@ -1,0 +1,165 @@
+/* ------------microsoft dhcp--------- */
+[INGEST:vendor="microsoft", product="DHCP", target_dataset="microsoft_dhcp_raw", no_hit=keep]
+alter _raw_log = split(_raw_log, ",")
+| alter
+    event_id          = arrayindex(_raw_log, 0),
+    event_date        = arrayindex(_raw_log, 1),
+    event_time        = arrayindex(_raw_log, 2),
+    description       = arrayindex(_raw_log, 3),
+    ipAddress        = arrayindex(_raw_log, 4),
+    hostname          = arrayindex(_raw_log, 5),
+    client_identifier = arrayindex(_raw_log, 6),
+    username          = arrayindex(_raw_log, 7),
+    transaction_id    = arrayindex(_raw_log, 8),
+    qresult           = arrayindex(_raw_log, 9),
+    probation_time    = arrayindex(_raw_log, 10),
+    correlation_id    = arrayindex(_raw_log, 11),
+    dhcid             = arrayindex(_raw_log, 12),
+    vendor_class_hex  = arrayindex(_raw_log, 13),
+    vendor_class      = arrayindex(_raw_log, 14),
+    user_class_hex    = arrayindex(_raw_log, 15),
+    user_class        = arrayindex(_raw_log, 16),
+    relay_agent_info  = arrayindex(_raw_log, 17),
+    dns_reg_error     = arrayindex(_raw_log, 18);
+
+/* ------------microsoft dhcp--------- */
+
+/* ------------ citrix adc--------- */
+[INGEST:vendor="citrix", product="accesslog", target_dataset="citrix_accesslog_raw", no_hit=keep]
+alter
+    observer_name = arrayindex(regextract(_raw_log, "<\d+>\s+\S+\s+\S+\s+(?<hostname>\S+)"),0),
+    source_ipv4 = arrayindex(regextract(_raw_log,"src=(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"), 0),
+    target_ipv4 = arrayindex(regextract(_raw_log,"dst=(\d{1,3}(?:\.\d{1,3}){3})"), 0),
+    source_port = to_integer(arrayindex(regextract(_raw_log,"srcPort=(\d+)"), 0)),
+    target_port = to_integer(arrayindex(regextract(_raw_log,"dstPort=(\d+)"), 0)),
+    target_application_name   = arrayindex(regextract(_raw_log,"resource=([^\s]+)"), 0),
+    network_http_url = arrayindex(regextract(_raw_log,"url=([^\s]+)"), 0),
+    network_http_method = arrayindex(regextract(_raw_log,"http_method=([A-Z]+)"), 0),
+    source_user_agent = arrayindex(regextract(_raw_log,"user_agent=(.*?)\s+client_tls_info="), 0),
+    network_tls_cipher = arrayindex(regextract(_raw_log,"client_tls_info=([^\s]+)"), 0),
+    source_user_username = arrayindex(regextract(_raw_log,"User\s+(.*?)\s+-\s+ADM_User"), 0),
+    event_operation_sub_type = arrayindex(regextract(_raw_log,"default\s+([A-Z]+)"), 0),
+    source_process_command_line = arrayindex(regextract(_raw_log, "Command\s+\"(.*?)\""),0),
+    event_outcome = arrayindex(regextract(_raw_log, "Status\s+\"(.*?)\""),0),
+    network_http_response_code = arrayindex(regextract(_raw_log,"http_status_code=(\d+)"), 0);
+/* ------------ citrix adc--------- */
+
+/* ------------ linux bind --------- */
+[INGEST:vendor="linux", product="bind", target_dataset="linux_bind_raw", no_hit=keep]
+filter _raw_log contains "named[" and _raw_log contains "query:"
+| alter tmp_bind_time = arrayindex(regextract(_raw_log, "(\d{2}\-[A-Za-z]{3}\-\d{4}\s\d{2}:\d{2}:\d{2})\.\d{3}"), 0)
+| alter _time = parse_timestamp("%d-%b-%Y %H:%M:%S", tmp_bind_time)
+| alter
+  observer_name = arrayindex(regextract(_raw_log ,"\<\d+\>[A-Za-z]+\s+\d+\s+\d+\:\d+\:\d+\s+([A-Za-z0-9._-]+)\s+"),0),
+  process_pid = arrayindex(regextract(_raw_log, "named\[([0-9]+)\]"),0),
+  bind_timestamp = arrayindex(regextract(_raw_log, "([0-9]{2}-[A-Za-z]{3}-[0-9]{4} [0-9:.]+)"),0),
+  client_ip    = arrayindex(regextract(_raw_log, "client\s+@[a-zA-Z0-9]+\s+([\d.]+)"), 0) ,
+  client_context  = arrayindex(regextract(_raw_log, "client\s+@[a-zA-Z0-9]+\s+[\d.]+\#\d+\s+\(([^)]+)\)"), 0) ,
+  client_port = arrayindex(regextract(_raw_log, "#([0-9]+) \("),0),
+  dns_query_name = arrayindex(regextract(_raw_log, "query: ([^ ]+) IN"),0),
+  dns_query_type = arrayindex(regextract(_raw_log, " IN ([A-Z0-9]+) "),0),
+  dns_server_ip = arrayindex(regextract(_raw_log, "query:[^\n]+?\((\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\)"), 0),
+  client_id = arrayindex(regextract(_raw_log, "client\s+@(\S+?)\s+"), 0) ;
+/* ------------ linux bind --------- */
+
+/* ------------ akamai waf --------- */
+[INGEST:vendor="akamai", product="waf", target_dataset="akamai_waf_raw", no_hit=drop]
+filter CUSTOMFIELD != null
+| alter 
+    clientTLSFingerprintV2 = arrayindex(regextract(CUSTOMFIELD, "clientTLSFingerprintV2=([^;]+)"), 0),
+    akamai_grn = arrayindex(regextract(CUSTOMFIELD, "Akamai-GRN=([^;]+)"), 0);
+/* ------------ akamai waf --------- */
+
+/* ------------ f5 waf dos --------- */
+[INGEST:vendor="f5", product="dos", target_dataset="f5_dos_raw", no_hit = keep]
+alter
+    hostname = arrayindex(regextract(_raw_log, "hostname=\"([^\"]*)\""), 0),
+    dos_baseline_tps = arrayindex(regextract(_raw_log, "dos_baseline_tps=\"([^\"]*)\""), 0),
+    dos_attack_event = arrayindex(regextract(_raw_log, "dos_attack_event=\"([^\"]*)\""), 0),
+    dos_attack_name = arrayindex(regextract(_raw_log, "dos_attack_name=\"([^\"]*)\""), 0),
+    dos_mitigation_reason = arrayindex(regextract(_raw_log, "dos_mitigation_reason=\"([^\"]*)\""), 0),
+    dos_attack_tps = arrayindex(regextract(_raw_log, "dos_attack_tps=\"([^\"]*)\""), 0),
+    dos_dropped_requests_count = arrayindex(regextract(_raw_log, "dos_dropped_requests_count=\"([^\"]*)\""), 0),
+    dos_incoming_requests_count = arrayindex(regextract(_raw_log, "dos_incoming_requests_count=\"([^\"]*)\""), 0),
+    client_request_uri = arrayindex(regextract(_raw_log, "client_request_uri=\"([^\"]*)\""), 0),
+    dos_attack_detection_mode = arrayindex(regextract(_raw_log, "dos_attack_detection_mode=\"([^\"]*)\""), 0),
+    dos_attack_id = arrayindex(regextract(_raw_log, "dos_attack_id=\"([^\"]*)\""), 0),
+    client_ip_geo_location = arrayindex(regextract(_raw_log, "client_ip_geo_location=\"([^\"]*)\""), 0),
+    reported_entity_type = arrayindex(regextract(_raw_log, "reported_entity_type=\"([^\"]*)\""), 0),
+    dos_attack_latency = arrayindex(regextract(_raw_log, "dos_attack_latency=\"([^\"]*)\""), 0),
+    dos_baseline_latency = arrayindex(regextract(_raw_log, "dos_baseline_latency=\"([^\"]*)\""), 0);
+
+/* ------------ f5 waf bot --------- */
+[INGEST:vendor="f5", product="bot", target_dataset="f5_bot_raw", no_hit = keep]
+alter
+    hostname = arrayindex(regextract(_raw_log, "hostname=\"([^\"]*)\""), 0),
+    action = arrayindex(regextract(_raw_log, "action=\"([^\"]*)\""), 0),
+    anomalies = arrayindex(regextract(_raw_log, "anomalies=\"([^\"]*)\""), 0),
+    client_ip = arrayindex(regextract(_raw_log, "client_ip=\"([^\"]*)\""), 0),
+    client_request_uri = arrayindex(regextract(_raw_log, "client_request_uri=\"([^\"]*)\""), 0),
+    http_method = arrayindex(regextract(_raw_log, "http_method=\"([^\"]*)\""), 0),
+    client_ip_geo_location = arrayindex(regextract(_raw_log, "client_ip_geo_location=\"([^\"]*)\""), 0),
+    support_id = arrayindex(regextract(_raw_log, "support_id=\"([^\"]*)\""), 0),
+    bot_name = arrayindex(regextract(_raw_log, "bot_name=\"([^\"]*)\""), 0),
+    bot_signature = arrayindex(regextract(_raw_log, "bot_signature=\"([^\"]*)\""), 0),
+    bot_signature_category = arrayindex(regextract(_raw_log, "bot_signature_category=\"([^\"]*)\""), 0),
+    bot_class = arrayindex(regextract(_raw_log, "class=\"([^\"]*)\""), 0),
+    bot_profile = arrayindex(regextract(_raw_log, "profile_name=\"([^\"]*)\""), 0),
+    bot_target_host = arrayindex(regextract(_raw_log, "host=\"([^\"]*)\""), 0),
+    configured_mitigation_action = arrayindex(regextract(_raw_log, "configured_mitigation_action=\"([^\"]*)\""), 0),
+    actual_mitigation_action = arrayindex(regextract(_raw_log, "actual_mitigation_action=\"([^\"]*)\""), 0),
+    new_request_status = arrayindex(regextract(_raw_log, "new_request_status=\"([^\"]*)\""), 0),
+    client_type = arrayindex(regextract(_raw_log, "client_type=\"([^\"]*)\""), 0),
+    request_status = arrayindex(regextract(_raw_log, "request_status=\"([^\"]*)\""), 0);
+/* ------------ f5 waf bot --------- */
+
+/* ------------ microsoftiiswebserver (ingest) --------- */
+[INGEST:vendor="iis", product="iis", target_dataset="iis_iis_raw", no_hit = keep, content_id="microsoftiiswebserver"]
+call MICROSOFT_IIS_PARSE_FIELDS;
+
+[RULE:MICROSOFT_IIS_PARSE_FIELDS content_id="microsoftiiswebserver"]
+filter _raw_log ~= "^\d{4}\-\d{2}\-\d{2}\s+\d{2}:\d{2}:\d{2}\s+"
+| alter
+    tmp_num_of_fields = array_length(regextract(_raw_log, "(\S+)"))
+| alter
+    // Access log only (Cribl source, no filebeat metadata)
+    parsed_fields = if(
+        tmp_num_of_fields >= 22,
+        // W3C access schema:
+        // date time s-sitename s-computername s-ip cs-method cs-uri-stem cs-uri-query
+        // s-port cs-username c-ip cs-version cs(User-Agent) cs(Cookie) cs(Referer)
+        // cs-host sc-status sc-substatus sc-win32-status sc-bytes cs-bytes time-taken
+        regexcapture(_raw_log, "^(?P<date>\S+)\s+(?P<time>\S+)\s+(?P<s_sitename>\S+)\s+(?P<s_computername>\S+)\s+(?P<s_ip>\S+)\s+(?P<cs_method>\S+)\s+(?P<cs_uri_stem>\S+)\s+(?P<cs_uri_query>\S+)\s+(?P<s_port>\S+)\s+(?P<cs_username>\S+)\s+(?P<c_ip>\S+)\s+(?P<cs_version>\S+)\s+(?P<cs_user_agent>\S+)\s+(?P<cs_cookie>\S+)\s+(?P<cs_referer>\S+)\s+(?P<cs_host>\S+)\s+(?P<sc_status>\S+)\s+(?P<sc_substatus>\S+)\s+(?P<sc_win32_status>\S+)\s+(?P<sc_bytes>\S+)\s+(?P<cs_bytes>\S+)\s+(?P<time_taken>\S+)"),
+        // fallback
+        regexcapture(_raw_log, "(?P<date>\S+)\s+(?P<time>\S+)")
+    )
+| alter
+    _time = parse_timestamp("%Y-%m-%d %H:%M:%S", format_string("%s %s", parsed_fields -> date, parsed_fields -> time)),
+    parsed_fields = object_merge(parsed_fields, object_create("log_type", "Access Log"))
+| fields - tmp_num_of_fields;
+/* ------------ microsoftiiswebserver --------- */
+
+/*START Banca Transilvania Ekran Parsing Rule*/
+
+[INGEST:vendor="ekran_system", product="ekran_system", target_dataset="ekran_system_ekran_system_raw", no_hit=keep]
+filter _raw_log ~= "\S{3}\s\d{2}\s\d{4}\s\d{2}\:\d{2}\:\d{2}"
+| alter 
+    tmp_time = arrayindex(regextract(_raw_log,"^(\S{3}\s\d{2}\s\d{4}\s\d{2}\:\d{2}\:\d{2})"),0),
+    _time = parse_timestamp("%h %d %Y %H:%M:%S", tmp_time, "Europe/Bucharest")
+| alter
+    cat = arrayindex(regextract(_raw_log,"Cat=(\S+)\s+sev"),0),
+    sev = arrayindex(regextract(_raw_log,"\ssev=(\d{1})\s+usrName"),0),
+    usrName=arrayindex(regextract(_raw_log,"\susrName=\S+\\(.*)\s+identHostName"),0),
+    identHostName=arrayindex(regextract(_raw_log,"\sidentHostName=(\S+)\s+dst"),0),
+    dst=arrayindex(regextract(_raw_log,"\sdst=(\d+\.\d+\.\d+\.\d+)\s+src"),0),
+    src=arrayindex(regextract(_raw_log,"\ssrc=(\d+\.\d+\.\d+\.\d+)\s+request"),0),
+    request=arrayindex(regextract(_raw_log,"\srequest=(\S+)\s+utcDateTime"),0),
+    ActivityTitle=arrayindex(regextract(_raw_log,"\sActivityTitle=(.*?)\s+[a|A]pplicationName"),0),
+    ApplicationName=arrayindex(regextract(_raw_log,"\s[a|A]pplicationName=(\S+)\s+reason"),0),
+    reason=arrayindex(regextract(_raw_log,"\sreason=(\S+)\s+URL"),0),
+    URL=arrayindex(regextract(_raw_log,"\sURL=(\S+)\s+destinationDnsDomain"),0),
+    destinationDnsDomain=arrayindex(regextract(_raw_log,"\sdestinationDnsDomain=(\S+)\s+UserComment"),0),
+    UserComment=arrayindex(regextract(_raw_log,"\sUserComment=(.*?)$"),0)
+| fields - tmp_time;
+
+/*END Banca Transilvania Ekran Parsing Rule*/
