@@ -1,0 +1,761 @@
+/* -------------------------------------
+   ------------ Installed Rules -------------
+   ------------------------------------- */
+
+/* ------------ auditd --------- */
+[INGEST:vendor="unix", product="auditd", target_dataset="unix_auditd_raw" , no_hit = keep, content_id="auditd"]
+filter _raw_log ~= "[A-Za-z]+\s+\d+\s+\d+\:\d+\:\d+\s"
+//supported format - May 24 13:03:25
+| alter tmp_event_time = arrayindex(regextract(_raw_log ,"\<\d+\>([A-Za-z]+\s\d+\s\d+\:\d+\:\d+)\s"),0),
+    tmp_year = to_string(format_timestamp("%Y",_insert_time ))
+| alter tmp_full_event_time = concat(tmp_event_time , " ", tmp_year )
+| alter _time = parse_timestamp("%b %d %H:%M:%S %Y" , tmp_full_event_time)
+| fields - tmp_event_time , tmp_year , tmp_full_event_time;
+/* ------------ auditd --------- */
+/* ------------ aws-cloudtrail --------- */
+[INGEST:vendor="amazon", product="aws", target_dataset="amazon_aws_raw", no_hit = keep, content_id="aws-cloudtrail"]
+// Cloud Trail Audit Logs: https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-record-contents.html
+filter _log_type = "Cloud Audit Log" and to_string(eventTime) ~= "\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z" 
+| alter _time = parse_timestamp("%FT%H:%M:%E*SZ", to_string(eventTime)); // zulu time notation, e.g. "2024-09-27T11:18:59Z 
+
+// Flow Log Records: https://docs.aws.amazon.com/vpc/latest/userguide/flow-log-records.html
+filter _log_type = "Cloud Flow Log" and len(to_string(start)) = 10 // The time, in Unix seconds, when the first packet of the flow was received within the aggregation interval.
+| alter _time = to_timestamp(to_integer(start), "SECONDS"); 
+/* ------------ aws-cloudtrail --------- */
+/* ------------ aws-guardduty --------- */
+[INGEST:vendor="aws", product="guardduty", target_dataset="aws_guardduty_raw", no_hit=keep, content_id="aws-guardduty"]
+alter tmp_updated_at = to_string(coalesce(UpdatedAt, updatedAt)) // support both pascal case & camel case field naming convention 
+| filter tmp_updated_at ~= "\d{4}\-\d{2}\-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})"  // validate timestamp is compatible with RFC3339 / ISO8601 
+| alter _time = if(tmp_updated_at ~= "Z$", 
+    parse_timestamp("%FT%H:%M:%E*SZ", tmp_updated_at), // zulu time notation, e.g. "2024-09-24T16:41:59.698Z
+    parse_timestamp("%FT%H:%M:%E*S%Ez", tmp_updated_at)) // numerical offset e.g. 2024-09-24T19:41:59.698+03:00
+| fields - tmp_updated_at;
+
+/* ------------ aws-guardduty --------- */
+/* ------------ azureappservice --------- */
+[INGEST:vendor="MSFT", product="Azure", target_dataset="msft_azure_app_service_raw", no_hit = drop, content_id="azureappservice"]
+filter category in("AppServiceHTTPLogs", "AppServiceConsoleLogs", "AppServiceAppLogs", "AppServiceIPSecAuditLogs", "AppServicePlatformLogs", "AppServiceAntivirusScanAuditLogs", "AppServiceFileAuditLogs", "FunctionAppLogs", "AppServiceAuditLogs", "WorkflowRuntime", "AppServiceEnvironmentPlatformLogs")
+// zulu time suffix notation, e.g. "2024-09-24T16:41:59.698Z or YYYY-MM-DDTHH:mm:ss e.g. 2025-08-03T18:46:07 or YYYY-MM-DD HH:mm:ss e.g. 2025-08-03 18:46:07 or MM/DD/YYYY HH:mm:ss format e.g. "08/07/2025 07:45:01"
+| alter tmp_time = if(time != null and time != "", time, TimeGenerated != null and TimeGenerated != "", TimeGenerated)
+| alter _time = if(tmp_time contains "Z", parse_timestamp("%FT%H:%M:%E*SZ", to_string(tmp_time)), tmp_time ~= "\d+\/\d+\/\d+\s*\d+:\d+:\d+", parse_timestamp("%m/%d/%Y %T", to_string(tmp_time)), tmp_time ~= "\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", parse_timestamp("%FT%H:%M:%E*S", to_string(tmp_time)), tmp_time ~= "\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}", parse_timestamp("%F %H:%M:%E*S", to_string(tmp_time)))
+| fields -tmp_time;
+/* ------------ azureappservice --------- */
+/* ------------ azuredevops --------- */
+[INGEST:vendor="msft", product="azure", target_dataset="msft_azure_devops_raw", no_hit = drop, content_id="azuredevops"]
+// Supported timestamp is for UTC time YYYY-mm-ddTHH:MM:SS.ssssZ format. E.g; 2025-02-04T11:23:29.0324070Z
+// This filter supports ingestion from Log Analytics
+filter to_string(TimeGenerated) ~= "\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z"
+       AND Type = "AzureDevOpsAuditing"
+| alter
+    _time = TimeGenerated;
+
+ // This filter supports ingestion from Azure Event Hub.
+filter to_string(_raw_log->[0].eventTime) ~= "\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z" AND _raw_log->[0].eventType = "AzureDevOpsAuditEvent"
+| alter
+     tmp_time = _raw_log->[0].eventTime
+| alter
+     _time = parse_timestamp("%Y-%m-%dT%H:%M:%E*SZ", tmp_time)
+| fields -tmp_*;
+/* ------------ azuredevops --------- */
+/* ------------ azurefirewall --------- */
+[INGEST:vendor="msft", product="azure", target_dataset="msft_azure_firewall_raw", no_hit = drop, content_id="azurefirewall"]
+// assert log record is an Azure Firewall log
+filter category = "AZFW*"
+| alter _time = if( // parse RFC 3339 compatible timestamps
+    // numerical offset e.g. 2024-09-24T19:41:59.698+03:00
+    to_string(time) ~= "\d{4}\-\d{2}\-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?[+-]\d{2}:\d{2}", parse_timestamp("%FT%H:%M:%E*S%Ez", to_string(time)),
+
+    // zulu time suffix notation, e.g. "2024-09-24T16:41:59.698Z
+    to_string(time) ~= "\d{4}\-\d{2}\-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", parse_timestamp("%FT%H:%M:%E*SZ", to_string(time)),
+
+    // default fallback
+    _insert_time);
+/* ------------ azurefirewall --------- */
+/* ------------ azureflowlogs --------- */
+[INGEST:vendor="msft", product="azure", target_dataset="msft_azure_flowlogs_raw", no_hit = drop, content_id="azureflowlogs"]
+filter category in ("NetworkSecurityGroupFlowEvent", "FlowLogFlowEvent") or Type in ("NTA*") or _raw_log -> Type in ("NTA*")
+| alter
+    tmp_check_NTA = if(Type in ("NTA*"), Type, _raw_log -> Type in ("NTA*"), _raw_log -> Type, null)
+| alter
+    tmp_NSG_startTime = if(category = "NetworkSecurityGroupFlowEvent", to_timestamp(to_integer(startTime)), null),
+    tmp_flow_time = if(category in ("NetworkSecurityGroupFlowEvent", "FlowLogFlowEvent"), parse_timestamp("%Y-%m-%dT%H:%M:%E*SZ", to_string(time)), null),
+    tmp_NTA_NTAIpDetails = if(tmp_check_NTA = "NTAIpDetails", parse_timestamp("%Y-%m-%dT%H:%M:%E*SZ", to_string(_raw_log -> FlowIntervalStartTime)), null),
+    tmp_NTA_NTATopologyDetails = if(
+        tmp_check_NTA = "NTATopologyDetails" and to_string(_raw_log -> TimeProcessed) != null, parse_timestamp("%Y-%m-%dT%H:%M:%E*SZ", to_string(_raw_log -> TimeProcessed)),
+        tmp_check_NTA = "NTATopologyDetails" and to_string(_raw_log -> TimeGenerated) != null, parse_timestamp("%Y-%m-%dT%H:%M:%E*SZ", to_string(_raw_log -> TimeGenerated)), null
+        )
+| alter
+    _time = coalesce(tmp_NSG_startTime, tmp_flow_time, tmp_NTA_NTAIpDetails, tmp_NTA_NTATopologyDetails)
+| fields -tmp*;
+/* ------------ azureflowlogs --------- */
+/* ------------ azurekubernetesservices --------- */
+[INGEST:vendor="msft", product="azure", target_dataset="msft_azure_aks_raw", no_hit = drop, content_id="azurekubernetesservices"]
+// Supported timestamp is for UTC time YYYY-mm-ddTHH:MM:SS.ssssZ format. E.g; 2025-02-04T11:23:29.0324070Z
+filter
+    (
+        category in (
+            "cloud-controller-manager", 
+            "cluster-autoscaler", 
+            "kube-audit", 
+            "kube-audit-admin", 
+            "kube-apiserver", 
+            "kube-controller-manager", 
+            "kube-scheduler", 
+            "csi-snapshot-controller", 
+            "csi-azuredisk-controller", 
+            "csi-azurefile-controller", 
+            "SoftwareUpdateProfile", 
+            "SoftwareUpdates", 
+            "guard"
+        )
+        or Type in ("AKSAudit", "AKSAuditAdmin", "AKSControlPlane")
+    )
+| alter 
+    tmp_timestamp_extraction = if(
+        // Supported format for all of the below extractions in regex: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z
+        requestreceivedtime != null, requestreceivedtime,
+        TimeGenerated != null, TimeGenerated, 
+        to_string(properties -> log) -> requestReceivedTimestamp != null, to_string(properties -> log) -> requestReceivedTimestamp, time
+    )
+| alter
+    _time = parse_timestamp("%Y-%m-%dT%H:%M:%E*SZ", tmp_timestamp_extraction)
+| fields -tmp_*;
+/* ------------ azurekubernetesservices --------- */
+/* ------------ azurewaf --------- */
+[INGEST:vendor = "msft", product = "azure", target_dataset = "msft_azure_waf_raw", no_hit = drop, content_id="azurewaf"]
+/*
+Filter ApplicationGatewayAccessLog and ApplicationGatewayFirewallLog events
+*/
+filter category in ("ApplicationGatewayAccessLog", "ApplicationGatewayFirewallLog") OR Type in ("AGWAccessLogs", "AGWFirewallLogs") 
+/*
+Supported datetime formats:
+yyyy-MM-ddThh:mm:ssZ - %FT%XZ - "2025-05-03T00:27:53Z"
+yyyy-MM-ddThh:mm:ss.E7SZ  - %FT%H:%M:%E*SZ - "2025-05-02T13:26:25.3391768Z"
+yyyy-MM-ddThh:mm:ssEz - %FT%X%Z - "2024-11-19T10:50:39+00:00" (%Ez is RFC 3339-compatible numeric time zone)
+MMM dd yyyy HH:mm:ss - "Nov 19 2024 12:50:39"
+*/
+
+| alter 
+    timeStamp_t = to_string(timeStamp_t),
+    timeStamp = to_string(timeStamp),
+    time = to_string(time)
+| alter 
+    tmp_get_time_1 = if(len(timeStamp_t) > 0 , parse_timestamp("%FT%XZ" ,timeStamp_t) ,null),
+    tmp_get_time_2 = if(timeStamp contains "+", parse_timestamp("%FT%X%Z", timeStamp ),len(timeStamp) > 0 and timeStamp not contains "+", parse_timestamp("%h %d %Y %X", timeStamp ),null),
+    tmp_get_time_3 = if(len(time) > 20 and time not contains ".", parse_timestamp("%FT%X%Z", time ),len(time) = 20 and time not contains ".", parse_timestamp("%FT%XZ", time ),time ~="\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{1,9}Z", parse_timestamp("%FT%H:%M:%E*SZ", time ),null)
+| alter 
+    _time = coalesce(TimeGenerated , tmp_get_time_1  , tmp_get_time_2 , tmp_get_time_3 )
+| fields -tmp_get_time_1, tmp_get_time_2, tmp_get_time_3;
+
+/*
+Filter FrontDoorAccessLog and FrontDoorWebApplicationFirewallLog events
+*/
+filter Category in ("FrontDoorAccessLog", "FrontDoorWebApplicationFirewallLog")
+| alter
+    time = to_string(time)
+| alter
+    tmp_get_time = if(len(time) > 20 and time not contains ".", parse_timestamp("%FT%X%Z", time ),len(time) = 20 and time not contains ".", parse_timestamp("%FT%XZ", time ),time ~="\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{1,9}Z", parse_timestamp("%FT%H:%M:%E*SZ", time ),null)
+| alter
+    _time = coalesce(TimeGenerated , tmp_get_time);
+/* ------------ azurewaf --------- */
+/* ------------ cisco-ise --------- */
+[INGEST:vendor="cisco", product="ise", target_dataset="cisco_ise_raw", no_hit=keep, content_id="cisco-ise"]
+// Support only date time of format: MMM dd hh:mm:ss or format: yyyy-MM-dd hh:mm:ss.nnn [+|-]nn:nn or format: yyyy-MM-dd hh:mm:ss.nnn [+|-]nnnn. For example: "Jan 01 10:00:00" or "2022-01-01 10:00:00.123 +03:00" or "2022-01-01 10:00:00.123 +0300".
+filter _raw_log ~= "<\d+>\w+\s*\d+\s\d+:\d+:\d+\s" or _raw_log ~= "\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}\.\d{3}\s[+|-]\d+:?\d+\s"
+| alter
+        tmp_time2 = arrayindex(regextract(_raw_log,"<\d+>(\w+\s*\d+\s\d+:\d+:\d+)\s"),0),
+        tmp_time1 = arrayindex(regextract(_raw_log,"(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}\.\d{3}\s[+|-]\d+:?\d+)\s"),0),
+        tmp_Year = format_timestamp("%Y",_insert_time)
+// Parsing time format 2
+| alter tmp_time2_1 = concat(tmp_Year, " ", tmp_time2)
+| alter tmp_time2_1 = parse_timestamp("%Y %b %e %H:%M:%S", tmp_time2_1)
+| alter tmp_timeDiff = timestamp_diff(tmp_time2_1, current_time(), "MILLISECOND")
+| alter tmp_Year2 = if(tmp_timeDiff > 0, to_string(subtract(to_integer(tmp_Year),1)),null)
+| alter tmp_time2_2 = if(tmp_Year2 != null, concat(tmp_Year2, " ", tmp_time2), null)
+| alter tmp_time2_2 = if(tmp_time2_2 != null, parse_timestamp("%Y %b %e %H:%M:%S", tmp_time2_2), null)
+// Parsing time format 1
+| alter tmp_time1 = parse_timestamp("%Y-%m-%d %H:%M:%E3S %Ez", tmp_time1)
+| alter _time = coalesce(tmp_time1, tmp_time2_2, tmp_time2_1)
+| fields -tmp_time1, tmp_time2, tmp_Year, tmp_Year2, tmp_time2_1, tmp_time2_2, tmp_timeDiff;
+/* ------------ cisco-ise --------- */
+/* ------------ ciscoasa --------- */
+[INGEST:vendor="cisco", product="asa", target_dataset="cisco_asa_raw", no_hit = keep, content_id="ciscoasa"]
+alter _json = parse_cisco(_raw_log)
+| alter
+        tmp_time = _json -> date
+| alter
+        _time = if(tmp_time contains "Z", parse_timestamp("%Y-%m-%dT%H:%M:%SZ", tmp_time), tmp_time ~= "[+-]\d{1,2}:\d{1,2}", parse_timestamp("%Y-%m-%dT%H:%M:%S%Ez", tmp_time))
+| fields - tmp_time;
+/* ------------ ciscoasa --------- */
+/* ------------ citrixadc --------- */
+[INGEST:vendor="citrix", product="adc", target_dataset="citrix_adc_raw", no_hit=keep, content_id="citrixadc"]
+// Support only date time of format: MM/dd/yyyy:hh:mm:ss GMT. For example: "01/16/2021:19:00:00 GMT".
+filter _raw_log ~= "\s\d{2}\/\d{2}\/\d{4}\:\d{2}\:\d{2}\:\d{2}\sGMT\s"
+| alter tmp_timestamp = arrayindex(regextract(_raw_log,"\s(\d{2}\/\d{2}\/\d{4}\:\d{2}\:\d{2}\:\d{2})\sGMT\s"),0)
+| alter _time = if(tmp_timestamp != null, parse_timestamp("%m/%d/%Y:%H:%M:%S", tmp_timestamp), _insert_time)
+| fields -tmp_timestamp;
+/* ------------ citrixadc --------- */
+/* ------------ cyberarkepv --------- */
+[INGEST:vendor="cyber-ark", product="vault", target_dataset="cyber_ark_vault_raw", no_hit = keep, content_id="cyberarkepv"]
+// Supports parsing from the ISO 8601 compatible IsoTimestamp field (for e.g. 2023-07-31T11:30:59Z or 2023-07-31T11:30:59+03:00)
+filter cs6Label ~=  "IsoTimestamp" and to_string(cs6) ~= "[+-]\d{2}\:"
+| alter 
+
+	_time = parse_timestamp("%Y-%m-%dT%H:%M:%E*S%Ez", replex(to_string(cs6), "\s+", ""));
+
+
+filter cs6Label ~=  "IsoTimestamp" and to_string(cs6) ~= "[\.\d]+Z"
+| alter
+
+	_time = parse_timestamp("%Y-%m-%dT%H:%M:%E*SZ", replex(to_string(cs6), "\s+", ""));
+/* ------------ cyberarkepv --------- */
+/* ------------ f5bigipawaf --------- */
+[INGEST:vendor="f5", product="waf", target_dataset="f5_waf_raw", no_hit=keep, content_id="f5bigipawaf"]
+filter _raw_log ~= "\<\d+\>\s*\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}\:\d{2}[+-]\d{2}\:\d{2}"
+| alter
+    tmp_timestamp = arrayindex(regextract(_raw_log,"\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}\:\d{2}[+-]\d{2}\:\d{2}"),0)
+| alter
+    _time = parse_timestamp("%Y-%m-%dT%H:%M:%S%Ez", tmp_timestamp)
+| fields -tmp_timestamp;
+/* ------------ f5bigipawaf --------- */
+/* ------------ f5ltm --------- */
+[INGEST:vendor="f5", product="ltm", target_dataset="f5_ltm_raw", no_hit=keep, content_id="f5ltm"]
+// Support only date time of format: MMM dd yyyy hh:mm:ss or format: yyyy-MM-dd hh:mm:ss. For example: "Jan 01 2021 10:00:00" or "2021-01-01 10:00:00".
+filter _raw_log ~= "timestamp\=\"\w+\s\d+\s\d+\s\d{2}\:\d{2}\:\d{2}\"\," or _raw_log ~= "date_time\=\"\d+-\d+-\d+\s\d{2}\:\d{2}\:\d{2}\"\,"
+| alter
+        timestamp = arrayindex(regextract(_raw_log,"timestamp\=\"([^=]+)\"\,"),0),
+        timestamp2 = arrayindex(regextract(_raw_log,"date_time\=\"([^=]+)\"\,"),0)
+| alter
+        timestamp = parse_timestamp("%b %d %Y %H:%M:%S", timestamp),
+        timestamp2 = parse_timestamp("%Y-%m-%d %H:%M:%S", timestamp2)
+| alter _time = coalesce(timestamp, timestamp2)
+| fields -timestamp, timestamp2;
+/* ------------ f5ltm --------- */
+/* ------------ fireeyenx --------- */
+[INGEST:vendor="fireeye", product="mps", target_dataset="fireeye_mps_raw", no_hit = keep, content_id="fireeyenx"]
+filter to_string(rt) ~= "\d{7,13}"
+| alter _time = to_timestamp(to_integer(rt), "millis");
+/* ------------ fireeyenx --------- */
+/* ------------ fortigate --------- */
+[INGEST:vendor="Fortinet", product="Fortigate", target_dataset="fortinet_fortigate_raw", no_hit=keep, content_id="fortigate"]
+filter to_string(FTNTFGTeventtime) ~= "\d{9}$"
+| alter
+    tmp_remove_milli_secs = to_integer(replex(FTNTFGTeventtime, "\d{9}$", "")),
+    tmp_check_duration = if(FTNTFGTduration = null, 0, to_integer(FTNTFGTduration))
+| alter
+    tmp_substract_diff = subtract(tmp_remove_milli_secs, tmp_check_duration)
+| alter
+    _time = to_timestamp(tmp_substract_diff)
+| fields -tmp_remove_milli_secs, tmp_check_duration, tmp_substract_diff
+| fields FTNTFG*, act, _scope, app, c6a2, c6a3, cat, cefDeviceEventClassId, cefDeviceProduct, cefDeviceVendor, cefDeviceVersion, cefName, cefSeverity, cefVersion, cnt, destinationTranslatedAddress, destinationTranslatedPort, deviceDirection, deviceExternalId, deviceInboundInterface, deviceOutboundInterface, dhost, dpt, dst, duser, dvchost, externalID, externalId, fname, fsize, `in`, msg, out, outcome, proto, reason, request, requestClientApplication, requestContext, requestCookies, shost, sourceServiceName, sourceTranslatedAddress, sourceTranslatedPort, sproc, spt, src, suser;
+/* ------------ fortigate --------- */
+/* ------------ helloworld --------- */
+
+[INGEST:vendor="hello", product="world", target_dataset="hello_world_raw", no_hit = keep, content_id="helloworld"]
+alter _time = created_time;
+/* ------------ helloworld --------- */
+/* ------------ jira --------- */
+[INGEST:vendor="atlassian", product="jira", target_dataset="atlassian_jira_raw", no_hit=drop, content_id="jira"]
+// Support only date time of format: YYYY-MM-DDTHH:MM:SS.E3Z%z. For example: "2022-11-20T15:17:11.419+0000".
+filter created ~= "\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}\:\d{2}\.\d{3}[\+|\-]\d{4}" and _raw_log = null //adding rawlog filter for Jira Datacenter events
+|alter 
+    tmp_date_part = arraystring(regextract(created, "^(\d{4}\-\d{2}\-\d{2})T"), ""),
+    tmp_time_part = arraystring(regextract(created, "T(\d{2}\:\d{2}\:\d{2})\."), ""),
+    tmp_zone_part = arraystring(regextract(created, "\.[\d]+([+|-]\d+)"), "")
+| alter 
+    tmp_datetime = arraystring(arraycreate(tmp_date_part, tmp_time_part), " ")
+| alter
+    _time = parse_timestamp("%Y-%m-%d %H:%M:%S %z", arraystring(arraycreate(tmp_datetime, tmp_zone_part), " "))
+| fields -tmp_date_part, tmp_time_part, tmp_zone_part, tmp_datetime;
+/* ------------ jira --------- */
+/* ------------ kubernetes --------- */
+[INGEST:vendor="kubernetes", product="kubernetes", target_dataset="kubernetes_kubernetes_raw", no_hit=keep, content_id="kubernetes"]
+// Support only date time of format: yyyy-MM-ddThh:mm:ss.E*SZ. For example: "2021-01-01T10:00:00.123456Z".
+filter _raw_log ~= "requestReceivedTimestamp\":\"\d+-\d+\-\d+T\d+:\d+:\d+\.\d{3,}Z"
+| alter
+    tmp_datetime_extract = arraystring(regextract(_raw_log, "requestReceivedTimestamp\":\"(\d+-\d+\-\d+T\d+:\d+:\d+)\.\d{3}"), ""),
+    tmp_milli_extract = arraystring(regextract(_raw_log, "requestReceivedTimestamp\":\"\d+-\d+\-\d+T\d+:\d+:\d+\.(\d{3})"), "")
+| alter
+    tmp_datetime_replex = replex(tmp_datetime_extract, "T", " ")
+| alter
+    tmp_time_to_epoch = to_string(to_epoch(parse_timestamp("%Y-%m-%d %H:%M:%S", tmp_datetime_replex)))
+| alter
+    tmp_time_with_mili = arraystring(arraycreate(tmp_time_to_epoch, tmp_milli_extract), "")
+| alter
+    _time = to_timestamp(to_integer(tmp_time_with_mili), "millis")
+| fields -tmp_datetime_extract, tmp_milli_extract, tmp_datetime_replex, tmp_time_to_epoch, tmp_time_with_mili;
+/* ------------ kubernetes --------- */
+/* ------------ linuxeventscollection --------- */
+[INGEST:vendor="linux", product="linux", target_dataset="linux_linux_raw", no_hit=keep, content_id="linuxeventscollection"]
+// Filter applies to log records which contain a full RFC 3339 / ISO 8601 style timestamp with an explicit timezone offset or Zulu time suffix (UTC)
+filter _raw_log ~= "\d{4}\-\d{2}\-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?\s*(?:[+-]\d{2}:?\d{2}|Z)" and _raw_log not contains "kubelet-serving: Certificate expiration"
+| alter tmp_json_payload = arrayindex(regextract(_raw_log, "({.+})"), 0) // extract inner json payload from _raw_log if such exists
+| alter tmp_timestamp = coalesce( // extract timestamp field from json payload if it exists or the raw text if it does not
+    tmp_json_payload -> time,
+    tmp_json_payload -> Data.Client.CurrentDateTime, 
+    arrayindex(regextract(_raw_log, "(\d{4}\-\d{2}\-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?\s*(?:[+-]\d{2}:?\d{2}|Z))"), 0))
+| alter // extract the different timestamp components: date, time & timezone offset from UTC 
+    tmp_date = arrayindex(regextract(tmp_timestamp, "(\d{4}\-\d{2}\-\d{2})"), 0), 
+    tmp_time = arrayindex(regextract(tmp_timestamp, "(\d{2}:\d{2}:\d{2}(?:\.\d+)?)"), 0), 
+    tmp_timezone_offset = arrayindex(regextract(tmp_timestamp, "((?:[+-]\d{2}:?\d{2}|Z$))"), 0) 
+// format the components to an RFC3339 compatible-like timestamp notation: <date>T<time><timezone_offset>
+| alter tmp_formatted_timestamp = format_string("%sT%s%s", tmp_date, tmp_time, tmp_timezone_offset)
+| alter _time = if( // initialize _time according to timezone offset format 
+    tmp_timezone_offset = "Z", parse_timestamp("%FT%H:%M:%E*SZ", tmp_formatted_timestamp), // Zulu time notation (UTC) e.g., 2024-10-28T14:30:55.123Z
+    tmp_timezone_offset ~= "[+-]\d{4}", parse_timestamp("%FT%H:%M:%E*S%z", tmp_formatted_timestamp), // [+-HHMM], e.g, 2024-10-28T14:30:55.123+0200
+    tmp_timezone_offset ~= "[+-]\d{2}:\d{2}", parse_timestamp("%FT%H:%M:%E*S%Ez", tmp_formatted_timestamp)) // [+-HH:MM], e.g, 2024-10-28T14:30:55.123+02:00
+| fields - tmp*;
+
+/*
+Standard Linux ISO-8601 Extended Timestamp Parser Description: > This parsing rule extracts and normalizes timestamps in the YYYY-MM-DD HH:mm:ss ZZZ format. It specifically handles the 24-hour clock format used in standard Linux system logs and resolves the verbal offset for example:"CST"(UTC-6) timezone suffix to ensure accurate temporal indexing across distributed environments.
+The parser treats incoming data as UTC (-00:00) by default to maintain a standardized temporal baseline.
+Users can manually adjust the timezone offset to align with specific regional preferences or local server requirements.
+*/
+filter _raw_log ~= "\d{4}\-\d{2}\-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?\s[A-Z]{3}" /* Timestamp format: 2026-01-20 03:16:49 CST*/ and not _raw_log ~= "\d{4}\-\d{2}\-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?\s*(?:[+-]\d{2}:?\d{2}|Z)"
+| alter 
+    tmp_timestamp_without_offset = arrayindex(regextract(_raw_log ,"\d{4}\-\d{2}\-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?"),0) 
+| alter 
+    _time = parse_timestamp("%Y-%m-%d %H:%M:%E*S%Ez",concat(tmp_timestamp_without_offset,"-00:00")) // Here you can adjust your timezone offset preferences for example change "-00:00" to "-05:00".
+| fields -tmp*;
+
+/* Filter applies to RFC 3164 style syslog records (logs timestamp does not contain an explicit timezone nor year), which are ingested via the Broker VM syslog applet 
+   Log records which are ingested via the XDR Filebeat collector or excluded since their timestamp assignment is handled in the backend within the XDRC based on the Filebeat @timestamp entity. */
+filter _collector_type != "XDR Collector" and _raw_log ~= "\w{3}\s+\d{1,2}\s\d{2}:\d{2}:\d{2}" and _raw_log !~= "\d{4}\-\d{2}\-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?\s*(?:[+-]\d{2}:?\d{2}|Z)" and not _raw_log ~= "\d{4}\-\d{2}\-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?\s[A-Z]+"
+| alter // construct timestamp based on log timestamp and current year, assuming timestamp is given in UTC 
+    tmp_current_year = format_timestamp("%Y", _insert_time), 
+    tmp_rfc_3164_timestamp = arrayindex(regextract(_raw_log, "\w{3}\s+\d{1,2}\s\d{2}:\d{2}:\d{2}"), 0) // RFC 3164 compatible timestamp, e.g., Oct 28 14:30:55
+| alter tmp_current_year_timestamp = parse_timestamp("%Y %b %e %H:%M:%S", concat(tmp_current_year, " ", tmp_rfc_3164_timestamp), "UTC") 
+| alter _time = if( // validate the evaluated timestamp with current year is not in the future due to year transition during ingestion. If so, fallback to previous year. 
+    timestamp_diff(tmp_current_year_timestamp, current_time(), "MILLISECOND") <= 0, tmp_current_year_timestamp, // current (ingestion time) year 
+    parse_timestamp("%Y %b %e %H:%M:%S", concat(to_string(subtract(to_integer(tmp_current_year), 1)), " ", tmp_rfc_3164_timestamp), "UTC")) // previous year 
+| fields - tmp*;
+/* ------------ linuxeventscollection --------- */
+/* ------------ mcafeewebgateway --------- */
+[INGEST:vendor="mcafee", product="webgateway", target_dataset="mcafee_webgateway_raw", no_hit=keep, content_id="mcafeewebgateway"]
+filter _raw_log ~= "time_stamp\=\[\d+\/\w+\/\d+\:\d+\:\d+\:\d+\s+[\+\-]\d+\]"
+| alter
+    tmp_get_date = arraystring(regextract(_raw_log, "time_stamp\=\[(\d+\/\w+\/\d+)\:\d+\:\d+\:\d+\s+[\+\-]\d+\]"), ""),
+    tmp_get_time_and_zone = arraystring(regextract(_raw_log, "time_stamp\=\[\d+\/\w+\/\d+\:(\d+\:\d+\:\d+\s+[\+\-]\d+)\]"), "")
+| alter
+    tmp_unite_format = arraystring(arraycreate(tmp_get_date, tmp_get_time_and_zone), " ")
+| alter
+    _time = parse_timestamp("%d/%h/%Y %H:%M:%S %z", tmp_unite_format)
+| fields -tmp_get_date, tmp_get_time_and_zone, tmp_get_time_and_zone;
+/* ------------ mcafeewebgateway --------- */
+/* ------------ microsoftdhcp --------- */
+[INGEST:vendor="microsoft", product="DHCP", target_dataset="microsoft_dhcp_raw", no_hit=keep, content_id="microsoftdhcp"]
+// Support only date time of format: MM/dd/yy hh:mm:ss [+|-]nn:nn. For example: "01/10/21 10:00:00 +03:00".
+filter date ~= "\d{2}\/\d{2}\/\d{2}" and time ~= "\d{2}:\d{2}:\d{2}.*" and `timezone` ~= "[\+|-]\d{2}\:?\d{2}"
+| alter tmp_time = concat(date, " ", time," ", `timezone`)
+| alter _time = parse_timestamp("%D %X %Ez", tmp_time)
+| fields -tmp_time;
+/* ------------ microsoftdhcp --------- */
+/* ------------ microsoftdns --------- */
+[INGEST:vendor="microsoft", product="windows", target_dataset="microsoft_dns_raw", no_hit=drop, content_id="microsoftdns"]
+// Support only date time of format: MM/dd/yyyy hh:mm:ss [AM|PM]. For example: 6/10/2022 5:11:49 AM
+filter _raw_log ~= "\d+\/\d+\/\d+\s\d+\:\d+\:\d+ \w{2}"
+| alter 
+    tmp_time_String1 = arrayindex(regextract(_raw_log,"\d+\/\d+\/\d+\s\d+\:\d+\:\d+ \w{2}" ),0)
+| alter 
+    tmp_event_time1 = parse_timestamp("%m/%d/%Y %I:%M:%S %p",tmp_time_String1)
+// 30/01/2023 13:18:25
+| alter 
+    tmp_time_String2 = arrayindex(regextract(_raw_log,"\d+\/\d+\/\d+\s\d+\:\d+\:\d+" ),0)
+| alter 
+    tmp_event_time2 = parse_timestamp("%d/%m/%Y %H:%M:%S",tmp_time_String2)
+| alter 
+    _time = coalesce(tmp_event_time1,tmp_event_time2)
+| fields - tmp_time_String1, tmp_event_time1,tmp_time_String2, tmp_event_time2;
+
+
+filter _raw_log = null AND to_string(time_created) ~= ".*\d{2}:\d{2}:\d{2}.*" AND (provider_name = "Microsoft-Windows-DNSServer" OR provider_name = "Microsoft-Windows-DNS-Server-Service")
+| alter
+    _time = time_created;
+/* ------------ microsoftdns --------- */
+/* ------------ microsoftentraid --------- */
+[INGEST:vendor="msft", product="azure", target_dataset="msft_azure_raw", no_hit=drop, content_id="microsoftentraid"]
+//
+// Azure Services categories and types that are excluded from this pack and are available in a dedicated pack.
+//
+filter 
+    category not in(
+        "AZFW*",
+        "FrontDoorAccessLog",
+        "FrontDoorWebApplicationFirewallLog",
+        "ApplicationGateway*",
+        "AppServiceHTTPLogs",
+        "AppServiceConsoleLogs",
+        "AppServiceAppLogs",
+        "AppServiceIPSecAuditLogs",
+        "AppServicePlatformLogs",
+        "AppServiceAntivirusScanAuditLogs",
+        "AppServiceFileAuditLogs",
+        "FunctionAppLogs",
+        "AppServiceAuditLogs",
+        "WorkflowRuntime",
+        "AppServiceEnvironmentPlatformLogs",
+        "cloud-controller-manager",
+        "cluster-autoscaler",
+        "kube-audit",
+        "kube-audit-admin",
+        "kube-apiserver",
+        "kube-controller-manager",
+        "kube-scheduler",
+        "csi-snapshot-controller",
+        "csi-azuredisk-controller",
+        "csi-azurefile-controller",
+        "SoftwareUpdateProfile",
+        "SoftwareUpdates",
+        "guard",
+        "NetworkSecurityGroupFlowEvent",
+        "FlowLogFlowEvent"
+        )
+    AND Type NOT IN (
+        "AzureDevOpsAuditing",
+        "AGWAccessLogs",
+        "AGWFirewallLogs",
+        "AKSAudit",
+        "AKSAuditAdmin",
+        "NTA*"
+        ) 
+    AND _raw_log ->[0].eventType NOT IN ("AzureDevOpsAuditEvent")
+    AND _raw_log -> Type NOT IN ("NTA*")
+//    
+// The actual timestamp ingestion available for this pack:
+//
+| alter tmp_time = if(
+    category in ("AuditLogs", "ProvisioningLogs", "ServicePrincipalRiskEvents", "UserRiskEvents"), properties -> activityDateTime,
+    category in ("ADFSSignInLogs", "ManagedIdentitySignInLogs", "NonInteractiveUserSignInLogs", "ServicePrincipalSignInLogs", "SignInLogs"), properties -> createdDateTime,
+    category in ("RiskyServicePrincipals", "RiskyUsers"), properties -> riskLastUpdatedDateTime,
+    CategoryValue in("Administrative", "Policy", "Alert") and (category = null or category = ""), to_string(TimeGenerated),
+    to_string(time))
+| alter tmp_time = if(tmp_time = null or tmp_time = "", to_string(TimeGenerated), tmp_time)
+| alter tmp_time = replace(tmp_time, "Z", "+00:00") // normalize zulu time suffix notation to a numerical offset
+| alter _time = if(tmp_time ~= "\d{4}\-\d{2}\-\d{2}T\d{1,2}:\d{1,2}:\d{1,2}(?:\.\d+)?[+-]\d{2}:\d{2}", parse_timestamp("%FT%H:%M:%E*S%Ez", tmp_time), _insert_time) // assert an RFC3339 compatible timestamp (e.g. "2024-09-24T19:41:59.698+03:00") or fallback to ingestion time
+| fields - tmp_time;
+
+[INGEST:vendor="msft", product="Azure AD", target_dataset="msft_azure_ad_raw", no_hit=keep, content_id="microsoftentraid"]
+filter to_string(createdDateTime) ~= ".*\d{2}:\d{2}:\d{2}.*"
+| alter
+    _time = createdDateTime;
+
+[INGEST:vendor="msft", product="Azure AD Audit", target_dataset="msft_azure_ad_audit_raw", no_hit=keep, content_id="microsoftentraid"]
+filter to_string(activityDateTime) ~= ".*\d{2}:\d{2}:\d{2}.*"
+| alter 
+    tmp_get_keys = rtrim(arraystring(arraymap(arraymap(to_string(additionalDetails) -> [], "@element" -> key), concat("(?P<", replex("@element", "[^a-zA-Z0-9_]", "_"), ">[^|]+)?\|")), ""), "\|"),
+    tmp_get_values = replex(replex(arraystring(arraymap(to_string(additionalDetails) -> [], if("@element" -> value = "" or "@element" -> value = null, "null", "@element" -> value)), "|"), "(?:^|)null(?:\||$)", "|"), "\|$", "")
+| alter
+    parsed_fields = if(tmp_get_values = null or tmp_get_values ~= "^\s*$", null, regexcapture(tmp_get_values, tmp_get_keys)),
+    _time = parse_timestamp("%Y-%m-%dT%H:%M:%E*SZ", to_string(activityDateTime))
+| fields -tmp_*;
+
+/* ------------ microsoftentraid --------- */
+/* ------------ microsoftiiswebserver --------- */
+[INGEST:vendor="iis", product="iis", target_dataset="iis_iis_raw", no_hit = keep, content_id="microsoftiiswebserver"]
+call MICROSOFT_IIS_PARSE_FIELDS;
+
+[RULE:MICROSOFT_IIS_PARSE_FIELDS content_id="microsoftiiswebserver"]
+filter _raw_log ~= "^\d{4}\-\d{2}\-\d{2}\s+\d{2}:\d{2}:\d{2}\s+"
+| alter
+     // util variables used for classifying the relevant log type i.e., access log or http error log 
+    tmp_logfile_name =  lowercase(_log_source_file_name),
+    tmp_logfile_path = lowercase(_log_source_file_path),
+
+    // util variables used for classifying the relevant W3C structure for http error logs 
+    tmp_num_of_fields = array_length(regextract(_raw_log, "(\S+)")) 
+
+// determine log type according to its origin file name & path 
+| alter tmp_log_type = if(tmp_logfile_name ~= "httperr" or tmp_logfile_path contains """system32\\logfiles\\httperr""", "Error Log", "Access Log")
+
+// determine log format according to log type and field list length, and extract the log fields accordingly into parsed_fields 
+| alter parsed_fields = if( 
+        tmp_log_type = "Access Log" and tmp_num_of_fields >= 22, // Schema: https://learn.microsoft.com/en-us/windows/win32/http/w3c-logging
+            // format: date time s-sitename s-computername s-ip cs-method cs-uri-stem cs-uri-query s-port cs-username c-ip cs-version cs(User-Agent) cs(Cookie) cs(Referer) cs-host sc-status sc-substatus sc-win32-status sc-bytes cs-bytes time-taken
+            regexcapture(_raw_log, "^(?P<date>\S+)\s+(?P<time>\S+)\s+(?P<s_sitename>\S+)\s+(?P<s_computername>\S+)\s+(?P<s_ip>\S+)\s+(?P<cs_method>\S+)\s+(?P<cs_uri_stem>\S+)\s+(?P<cs_uri_query>\S+)\s+(?P<s_port>\S+)\s+(?P<cs_username>\S+)\s+(?P<c_ip>\S+)\s+(?P<cs_version>\S+)\s+(?P<cs_user_agent>\S+)\s+(?P<cs_cookie>\S+)\s+(?P<cs_referer>\S+)\s+(?P<cs_host>\S+)\s+(?P<sc_status>\S+)\s+(?P<sc_substatus>\S+)\s+(?P<sc_win32_status>\S+)\s+(?P<sc_bytes>\S+)\s+(?P<cs_bytes>\S+)\s+(?P<time_taken>\S+)"),        
+        tmp_log_type = "Error Log" and tmp_num_of_fields = 13, // Error Log (Schema: https://learn.microsoft.com/en-us/windows/win32/http/format-of-the-http-server-api-error-logs)
+            // format: date time c-ip c-port s-ip s-port cs-version cs-method cs-uri sc-status s-siteid s-reason s-queuename
+            regexcapture(_raw_log, "^(?P<date>\S+)\s+(?P<time>\S+)\s+(?P<c_ip>\S+)\s+(?P<c_port>\S+)\s+(?P<s_ip>\S+)\s+(?P<s_port>\S+)\s+(?P<cs_version>\S+)\s+(?P<cs_method>\S+)\s+(?P<cs_uri>\S+)\s+(?P<sc_status>\S+)\s+(?P<s_siteid>\S+)\s+(?P<s_reason>\S+)\s+(?P<s_queuename>\S+)"),
+        tmp_log_type = "Error Log" and tmp_num_of_fields = 14, // Error Log 
+            // format: date time c-ip c-port s-ip s-port cs-version cs-method cs-uri streamid sc-status s-siteid s-reason s-queuename
+            regexcapture(_raw_log, "^(?P<date>\S+)\s+(?P<time>\S+)\s+(?P<c_ip>\S+)\s+(?P<c_port>\S+)\s+(?P<s_ip>\S+)\s+(?P<s_port>\S+)\s+(?P<cs_version>\S+)\s+(?P<cs_method>\S+)\s+(?P<cs_uri>\S+)\s+(?P<streamid>\S+)\s+(?P<sc_status>\S+)\s+(?P<s_siteid>\S+)\s+(?P<s_reason>\S+)\s+(?P<s_queuename>\S+)"),
+        tmp_log_type = "Error Log" and tmp_num_of_fields >= 16, // Error Log 
+            // format: date time c-ip c-port s-ip s-port cs-version cs-method cs-uri streamid streamid_ex sc-status s-siteid s-reason s-queuename transport
+            regexcapture(_raw_log, "^(?P<date>\S+)\s+(?P<time>\S+)\s+(?P<c_ip>\S+)\s+(?P<c_port>\S+)\s+(?P<s_ip>\S+)\s+(?P<s_port>\S+)\s+(?P<cs_version>\S+)\s+(?P<cs_method>\S+)\s+(?P<cs_uri>\S+)\s+(?P<streamid>\S+)\s+(?P<streamid_ex>\S+)\s+(?P<sc_status>\S+)\s+(?P<s_siteid>\S+)\s+(?P<s_reason>\S+)\s+(?P<s_queuename>\S+)\s+(?P<transport>\S+)"),
+        // default fallback 
+        regexcapture(_raw_log, "(?P<date>\S+)\s+(?P<time>\S+)"))
+
+| alter 
+    // handle timestamp 
+    _time = parse_timestamp("%Y-%m-%d %H:%M:%S", format_string("%s %s", parsed_fields -> date, parsed_fields -> time)),
+
+    // add the log type classification to the parsed_fields object
+    parsed_fields = object_merge(parsed_fields, object_create("log_type", tmp_log_type))
+
+// remove util fields 
+| fields - tmp_log_type, tmp_num_of_fields, tmp_logfile_name, tmp_logfile_path;
+/* ------------ microsoftiiswebserver --------- */
+/* ------------ microsoftwindowsevents --------- */
+[INGEST:vendor="microsoft", product="windows", target_dataset="microsoft_windows_raw", no_hit=drop, content_id="microsoftwindowsevents"]
+filter to_string(time_created) ~= ".*\d{2}:\d{2}:\d{2}.*" AND provider_name not in ("Microsoft-Windows-Sysmon", "AD FS Auditing", "Microsoft-Antimalware-Scan-Interface","Microsoft-Windows-DNSServer", "Microsoft-Windows-DNS-Server-Service")
+| alter
+    tmp_get_time = to_epoch(_time),
+    tmp_get_insert_time = to_epoch(_insert_time),
+    tmp_get_time_created = to_epoch(parse_timestamp("%FT%H:%M:%E*SZ",to_string(time_created)))
+| alter
+    _time = if(subtract(tmp_get_time_created, tmp_get_time) < 0, to_timestamp(tmp_get_time_created), subtract(tmp_get_insert_time, tmp_get_time) < 0, to_timestamp(tmp_get_insert_time), to_timestamp(tmp_get_time))
+| alter
+    _scope = coalesce(_scope, event_data -> _scope, event_data -> scope)
+| fields -tmp*;
+/* ------------ microsoftwindowsevents --------- */
+/* ------------ prismacloud --------- */
+[INGEST:vendor="prisma", product="cloud", target_dataset="prisma_cloud_raw", no_hit=keep, content_id="prismacloud"]
+// The alertTime timestamp parsing is supported for epoch unix-time timestamps represented in milliseconds 
+filter to_string(alertTime) ~= "\d{13}" 
+| alter _time = to_timestamp(to_integer(alertTime), "MILLIS");
+
+/* ------------ prismacloud --------- */
+/* ------------ slack --------- */
+[INGEST:vendor="slack", product="slack", target_dataset="slack_slack_raw", no_hit=keep, content_id="slack"]
+filter to_string(date_create) ~= "\d{10}"
+| alter _time = parse_timestamp("%s",to_string(date_create));
+/* ------------ slack --------- */
+/* ------------ symantecendpointprotection --------- */
+[INGEST:vendor="symantec", product="ep", target_dataset="symantec_ep_raw", no_hit = keep, content_id="symantecendpointprotection"]
+// Support only date time of format: MMM dd hh:mm:ss.nnn. For example: "Dec 1 10:00:00".
+filter _raw_log ~= "[a-zA-z]{3}\s*\d*\s\d*:\d*:\d*\s"
+| alter        
+    tmp_time_without_year = to_string(arrayindex(regextract(_raw_log, "([a-zA-z]{3}\s*\d*\s\d*:\d*:\d*)\s"),0)),
+    tmp_current_year = format_timestamp("%Y",_insert_time)
+| alter 
+    tmp_time_current_year = if(tmp_time_without_year != null and tmp_time_without_year != "", concat(tmp_current_year, " ", tmp_time_without_year), null)
+// Parse timestamp with current year
+    // Set this field according to the time zone from which the log is generated.
+    // Default time zone setting is for UTC time 00:00
+| alter 
+    tmp_time_current_year = parse_timestamp("%Y %b %d %T", tmp_time_current_year, "+00:00")
+// Calculate time diff
+| alter 
+    tmp_timeDiff = timestamp_diff(tmp_time_current_year, current_time(), "MILLISECOND")
+// Check if the date is a future date
+| alter 
+    tmp_last_year = if(tmp_timeDiff > 0, to_string(subtract(to_integer(tmp_current_year),1)), null)
+// Create timestamp minus 1 year if the timestamp is a future one
+| alter 
+    tmp_time_last_year = if(tmp_last_year != null, concat(tmp_last_year, " ", tmp_time_without_year), null)
+// Parse timestamp with last year value
+    // Set this field according to the time zone from which the log is generated.
+    // Default time zone setting is for UTC time 00:00
+| alter
+    tmp_time_last_year = if(tmp_time_last_year != null, parse_timestamp("%Y %b %d %T", tmp_time_last_year, "+00:00"), null)
+// Adding the extracted timestamp to the _time field.
+| alter 
+    _time = coalesce(tmp_time_last_year, tmp_time_current_year)
+| fields -tmp_time_without_year, tmp_current_year, tmp_time_current_year, tmp_timeDiff, tmp_last_year, tmp_time_last_year;
+/* ------------ symantecendpointprotection --------- */
+/* ------------ vmwarevcenter --------- */
+[INGEST:vendor="vmware", product="vcenter", target_dataset="vmware_vcenter_raw", no_hit=keep, content_id="vmwarevcenter"]
+filter _raw_log ~= "vcsa-audit"
+| alter
+    tmp_keys = regextract(_raw_log, "([a-zA-Z0-9_]+)=(?:\"[^\"]*\"|\S+)"),
+    tmp_values = regextract(_raw_log, "(?:[a-zA-Z0-9_]+)=(\"[^\"]*\"|\S+)")
+| alter
+    tmp_obj_struct = arraystring(arraymap(tmp_keys, concat("(?P<", "@element", ">[^\|]+)")), ",")
+| alter 
+    tmp_values = replex(to_json_string(tmp_values), "\"", "")
+| alter
+    parsed_fields = regexcapture(tmp_values, tmp_obj_struct);
+
+// Support only date time of format: yyyy-MM-ddThh:mm:ss.nnnnnn[+|-]nn:nn. For example: 2022-01-01T10:00:00.012345+00:00
+filter _raw_log ~= "^[a-zA-Z0-9\W]{0,10}\s\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}\:\d{2}\.\d+[+|-]\d+:\d+"
+| alter
+    tmp_date_part = arraystring(regextract(_raw_log, "^[a-zA-Z0-9\W]{0,10}\s(\d{4}\-\d{2}\-\d{2})T"), ""),
+    tmp_time_part = arraystring(regextract(_raw_log, "^[a-zA-Z0-9\W]{0,10}\s\d{4}\-\d{2}\-\d{2}T(\d{2}\:\d{2}\:\d{2}\.)"), ""),
+    tmp_mili_part = arraystring(regextract(_raw_log, "^[a-zA-Z0-9\W]{0,10}\s\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}\:\d{2}\.(\d+)"), ""),
+    tmp_zone_part = arraystring(regextract(_raw_log, "^[a-zA-Z0-9\W]{0,10}\s\d{4}\-\d{2}\-\d{2}T\d{2}\:\d{2}\:\d{2}\.\d+([+|-]\d+:\d+)"), "")
+| alter 
+    tmp_time_format = arraystring(arraycreate(tmp_date_part, tmp_time_part), " "),
+    tmp_milli_zone = arraystring(arraycreate(tmp_mili_part, tmp_zone_part), "")
+| alter
+    tmp_adjust_tmp_milli_zone = replex(tmp_milli_zone, ":", "")
+| alter
+    tmp_timestamp = arraystring(arraycreate(tmp_time_format, tmp_adjust_tmp_milli_zone), "")
+| alter
+    _time = parse_timestamp("%Y-%m-%d %H:%M:%E*S%z", tmp_timestamp)
+| fields -tmp_date_part, tmp_time_part, tmp_mili_part, tmp_zone_part, tmp_time_format, tmp_milli_zone, tmp_adjust_tmp_milli_zone, tmp_timestamp;
+/* ------------ vmwarevcenter --------- */
+/* -------------------------------------
+   ------------ PANW Rules -------------
+   ------------------------------------- */
+
+[INGEST:vendor="PANW", product="Cortex Audit", target_dataset="panw_cortex_audit_raw", no_hit=drop, skip_retention=True]
+filter audit_mth_research_user != null;
+[RULE:parse_ms_copilot_audit_log]
+alter
+    audit_log_type = auditLogRecordType
+// filter out PowerPlatformAdministratorActivity record type
+| filter audit_log_type ="CopilotInteraction"
+
+| alter
+    activity_id = id,
+    activity_event_time = createdDateTime,
+    user_id= userId,
+    user_email = userPrincipalName,
+    agent_type = "MSCopilotStudio",
+    user_name = "",
+    agent_id = "",
+    agent_name_raw=json_extract(auditData, "$.AppIdentity")
+
+| alter
+    agent_name_array = regextract(agent_name_raw ,"cr\d*c?\d*_(.*)$")
+| alter index = subtract(to_integer(array_length(agent_name_array )), 1)
+| alter agent_name= arrayindex(agent_name_array, index );
+
+[RULE:parse_servicenow_copilot_exec_plan]
+alter agent_value = json_extract_scalar(agent, "$.value")
+| alter usecase_value = json_extract_scalar(usecase , "$.value")
+| alter agent_id = coalesce(agent_value, usecase_value )
+
+| alter
+    activity_id = sys_id ,
+    activity_event_time = sys_updated_on ,
+    user_name = sys_updated_by ,
+    agent_type = "ServiceNow",
+    agent_name= "",
+    user_id = "",
+    user_email= "";
+
+[RULE:parse_servicenow_copilot_chat_msg]
+filter not (message ~= "^[{].*[}]$") 
+| alter
+    activity_id = sys_id ,
+    activity_event_time = sys_updated_on ,
+    user_name = sys_updated_by ,
+    agent_type = "ServiceNow" ,
+    msg = message
+| alter
+    execution_plan_id = json_extract(execution_plan, "$.value");
+
+[INGEST:vendor="msft", product="copilot_studio_agent_audit_log", target_dataset="sspm_ai_agent_audit", skip_retention=True, no_hit=drop]
+call parse_ms_copilot_audit_log
+| fields activity_id , activity_event_time, agent_id, agent_name, agent_type, user_id,  user_name, user_email;
+
+[INGEST:vendor="servicenow", product="servicenow_copilot_agent_exec_plan", target_dataset="sspm_ai_agent_audit", skip_retention=True, no_hit=drop]
+call parse_servicenow_copilot_exec_plan
+| fields activity_id , activity_event_time, agent_id, agent_name, agent_type, user_id,  user_name, user_email, sys_id as exec_plan_id;
+
+[INGEST:vendor="servicenow", product="servicenow_copilot_agent_chat_msg", target_dataset="sspm_ai_agent_chat_msg", skip_retention=True, no_hit=drop]
+call parse_servicenow_copilot_chat_msg
+| fields activity_id , activity_event_time , agent_type, execution_plan_id ,user_name, msg;
+
+
+
+/* -------------------------------------
+   ----- Automatic (Default) Rules -----
+   ------------------------------------- */
+
+[INGEST:vendor="f5", product="bigip_ltm", target_dataset="f5_bigip_ltm_raw", no_hit=drop]
+
+[INGEST:vendor="kong", product="apigw", target_dataset="kong_apigw_raw", no_hit=drop]
+
+[INGEST:vendor="gcp", product="apigee", target_dataset="gcp_apigee_raw", no_hit=drop]
+
+[INGEST:vendor="crowdstrike", product="fdr", target_dataset="crowdstrike_fdr_raw", no_hit=drop]
+
+[INGEST:vendor="sentinelone", product="deep_visibility", target_dataset="sentinelone_deep_visibility_raw", no_hit=drop]
+
+[INGEST:vendor="azure", product="apim", target_dataset="azure_apim_raw", no_hit=drop]
+
+[INGEST:vendor="msft", product="defender", target_dataset="msft_defender_raw", no_hit=drop]
+
+[INGEST:vendor="AWS - Security Hub", product="generic_alert", target_dataset="aws_security_hub_generic_alert_raw", no_hit=drop]
+
+[INGEST:vendor="AWS - SQS", product="generic_alert", target_dataset="aws_sqs_generic_alert_raw", no_hit=drop]
+
+[INGEST:vendor="AWSCloudTrail", product="AWS", target_dataset="awscloudtrail_aws_raw", no_hit=drop]
+
+[INGEST:vendor="AWSCloudTrailLogs", product="AWS", target_dataset="awscloudtraillogs_aws_raw", no_hit=drop]
+
+[INGEST:vendor="Citrix", product="NetScaler", target_dataset="citrix_netscaler_raw", no_hit=drop]
+
+[INGEST:vendor="mcafee", product="webgateway", target_dataset="mcafee_webgateway_raw", no_hit=drop]
+
+[INGEST:vendor="F5", product="ASM", target_dataset="f5_asm_raw", no_hit=drop]
+
+[INGEST:vendor="Symantec", product="DLP", target_dataset="symantec_dlp_raw", no_hit=drop]
+
+[INGEST:vendor="Skyhigh Security", product="WebGateway", target_dataset="skyhigh_security_webgateway_raw", no_hit=drop]
+
+[INGEST:vendor="cisco", product="ise", target_dataset="cisco_ise_raw", no_hit=drop]
+
+[INGEST:vendor="CrowdStrike", product="falcon_incident", target_dataset="crowdstrike_falcon_incident_raw", no_hit=drop]
+
+[INGEST:vendor="Thinkst Canary", product="generic_alert", target_dataset="thinkst_canary_generic_alert_raw", no_hit=drop]
+
+[INGEST:vendor="fireeye", product="emps", target_dataset="fireeye_emps_raw", no_hit=drop]
+
+[INGEST:vendor="McAfee", product="Web Gateway", target_dataset="mcafee_web_gateway_raw", no_hit=drop]
+
+[INGEST:vendor="symantec", product="ep", target_dataset="symantec_ep_raw", no_hit=drop]
+
+[INGEST:vendor="msft", product="Azure AD Audit", target_dataset="msft_azure_ad_audit_raw", no_hit=drop]
+
+[INGEST:vendor="msft", product="Azure AD", target_dataset="msft_azure_ad_raw", no_hit=drop]
+
+[INGEST:vendor="msft", product="O365 General", target_dataset="msft_o365_general_raw", no_hit=drop]
+
+[INGEST:vendor="msft", product="O365 Exchange Online", target_dataset="msft_o365_exchange_online_raw", no_hit=drop]
+
+[INGEST:vendor="msft", product="O365 Sharepoint Online", target_dataset="msft_o365_sharepoint_online_raw", no_hit=drop]
+
+[INGEST:vendor="msft", product="O365 Azure AD", target_dataset="msft_o365_azure_ad_raw", no_hit=drop]
+
+[INGEST:vendor="msft", product="Graph Security Alerts", target_dataset="msft_graph_security_alerts_raw", no_hit=drop]
+
+[INGEST:vendor="google", product="workspace drive", target_dataset="google_workspace_drive_raw", no_hit=drop]
+
+[INGEST:vendor="msft", product="copilot_studio_agent_audit_log", target_dataset="msft_copilot_studio_agent_audit_log_raw", no_hit=drop]
+
+[INGEST:vendor="servicenow", product="servicenow_copilot_agent_exec_plan", target_dataset="servicenow_servicenow_copilot_agent_exec_plan_raw", no_hit=drop]
+
+[INGEST:vendor="servicenow", product="servicenow_copilot_agent_chat_msg", target_dataset="servicenow_servicenow_copilot_agent_chat_msg_raw", no_hit=drop]
+
+[INGEST:vendor="f5", product="waf", target_dataset="f5_waf_raw", no_hit=drop]
+
+[INGEST:vendor="akamai", product="waf", target_dataset="akamai_waf_raw", no_hit=drop]
+
+[INGEST:vendor="microsoft", product="dns", target_dataset="microsoft_dns_raw", no_hit=drop]
+
+[INGEST:vendor="Unix", product="Auditd", target_dataset="unix_auditd_raw", no_hit=drop]
+
+[INGEST:vendor="Darktrace", product="DCIP", target_dataset="darktrace_dcip_raw", no_hit=drop]
+
+[INGEST:vendor="FORCEPOINT", product="Firewall", target_dataset="forcepoint_firewall_raw", no_hit=drop]
+
+[INGEST:vendor="TXOne Networks", product="StellarProtect (Legacy Mode)", target_dataset="txone_networks_stellarprotect_legacy_mode__raw", no_hit=drop]
+
+[INGEST:vendor="TXOne Networks", product="StellarOne", target_dataset="txone_networks_stellarone_raw", no_hit=drop]
+
+[INGEST:vendor="FORCEPOINT", product="Alert", target_dataset="forcepoint_alert_raw", no_hit=drop]
+
+[INGEST:vendor="CyberArk", product="PTA", target_dataset="cyberark_pta_raw", no_hit=drop]
+
+[INGEST:vendor="FORCEPOINT", product="Audit", target_dataset="forcepoint_audit_raw", no_hit=drop]
+
+[INGEST:vendor="VMware", product="vCenter", target_dataset="vmware_vcenter_raw", no_hit=drop]
+
+[INGEST:vendor="msft", product="azure", target_dataset="msft_azure_raw", no_hit=drop]
+
+[INGEST:vendor="withsecure", product="endpoint_protection", target_dataset="withsecure_endpoint_protection_raw", no_hit=drop]
+
+[INGEST:vendor="mcafee", product="webgateway-cloud", target_dataset="mcafee_webgateway_cloud_raw", no_hit=drop]
+
+[INGEST:vendor="f5", product="dos", target_dataset="f5_dos_raw", no_hit=drop]
+
+[INGEST:vendor="f5", product="bot", target_dataset="f5_bot_raw", no_hit=drop]
+
+[INGEST:vendor="cisco", product="firepower", target_dataset="cisco_firepower_raw", no_hit=drop]
+
+[INGEST:vendor="Microsoft", product="DHCP", target_dataset="microsoft_dhcp_raw", no_hit=drop]
+
+[INGEST:vendor="citrix", product="accesslog", target_dataset="citrix_accesslog_raw", no_hit=drop]
+
